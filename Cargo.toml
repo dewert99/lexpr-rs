@@ -1,3 +1,7 @@
+[patch.crates-io]
+serde = { git = "https://github.com/dewert99/serde.git", branch = "deserialize_retry" }
+serde_derive = { git = "https://github.com/dewert99/serde.git", branch = "deserialize_retry" }
+
 [workspace]
 members = [
     "lexpr",

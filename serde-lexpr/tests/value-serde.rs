@@ -167,6 +167,34 @@ fn test_complex_enum() {
 }
 
 #[test]
+fn test_untagged_enum() {
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    enum TaggedGreeting {
+        Hello,
+        GoodBye,
+        Counted(u32, String),
+    }
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    #[serde(untagged)]
+    enum Greeting {
+        Tagged(TaggedGreeting),
+        Other(String),
+    }
+
+    test_serde(&Greeting::Tagged(TaggedGreeting::Hello), &sexp!(Hello));
+    test_serde(&Greeting::Tagged(TaggedGreeting::GoodBye), &sexp!(GoodBye));
+    test_serde(
+        &Greeting::Other("Farewell".into()),
+        &sexp!("Farewell"),
+    );
+    test_serde(
+        &Greeting::Tagged(TaggedGreeting::Counted(42, "Have a nice day".into())),
+        &sexp!((Counted 42 "Have a nice day")),
+    );
+}
+
+#[test]
 fn test_unit_struct() {
     #[derive(Serialize, Deserialize, PartialEq, Debug)]
     struct Unit;

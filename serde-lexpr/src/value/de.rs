@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use serde::de::{self, Error as SerdeError, Visitor};
+use serde::de::{self, DeserializeRetry, Error as SerdeError, Visitor};
 use serde::Deserialize;
 
 use lexpr::{number, Cons, Number};
@@ -8,6 +8,7 @@ use lexpr::{number, Cons, Number};
 use crate::error::{Error, Result};
 use crate::Value;
 
+#[derive(Copy, Clone)]
 pub struct Deserializer<'de> {
     input: &'de Value,
 }
@@ -38,7 +39,7 @@ pub fn from_value<'a, T>(value: &'a Value) -> Result<T>
 where
     T: Deserialize<'a>,
 {
-    T::deserialize(&mut Deserializer::from_value(value))
+    T::deserialize(Deserializer::from_value(value))
 }
 
 macro_rules! deserialize_prim_number {
@@ -55,7 +56,7 @@ macro_rules! deserialize_prim_number {
     };
 }
 
-impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
+impl<'de> de::Deserializer<'de> for Deserializer<'de> {
     type Error = Error;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value>
@@ -149,7 +150,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         match self.input {
             Value::Null => visitor.visit_none(),
             Value::Cons(cons) if cons.cdr().is_null() => {
-                visitor.visit_some(&mut Deserializer::from_value(cons.car()))
+                visitor.visit_some(Deserializer::from_value(cons.car()))
             }
             _ => Err(invalid_value(self.input, "empty or one-element list")),
         }
@@ -269,6 +270,10 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     {
         visitor.visit_unit()
     }
+
+    fn deserialize_with_retry<R: DeserializeRetry<'de>>(self, r: R) -> Result<R::Output> {
+        r.deserialize_with_retry(|| self)
+    }
 }
 
 fn visit_number<'de, V>(n: &'de Number, visitor: V) -> Result<V::Value>
@@ -352,7 +357,7 @@ impl<'de> de::SeqAccess<'de> for ConsAccess<'de> {
             _ => return Ok(None),
         };
         Ok(Some(
-            seed.deserialize(&mut Deserializer::from_value(value))?,
+            seed.deserialize(Deserializer::from_value(value))?,
         ))
     }
 }
@@ -379,7 +384,7 @@ impl<'de> de::SeqAccess<'de> for ListAccess<'de> {
     {
         match self.cursor {
             Some(cell) => {
-                let element = seed.deserialize(&mut Deserializer::from_value(cell.car()))?;
+                let element = seed.deserialize(Deserializer::from_value(cell.car()))?;
                 match cell.cdr() {
                     Value::Cons(next) => self.cursor = Some(next),
                     Value::Null => self.cursor = None,
@@ -414,7 +419,7 @@ impl<'de> de::SeqAccess<'de> for VecAccess<'de> {
             Ok(None)
         } else {
             let deserialized =
-                seed.deserialize(&mut Deserializer::from_value(&self.vec[self.index]))?;
+                seed.deserialize(Deserializer::from_value(&self.vec[self.index]))?;
             self.index += 1;
             Ok(Some(deserialized))
         }
@@ -446,7 +451,7 @@ impl<'de> de::MapAccess<'de> for MapAccess<'de> {
                 .ok_or_else(|| invalid_value(cell.car(), "cons cell"))
                 .and_then(|cell| {
                     Ok(Some(
-                        seed.deserialize(&mut Deserializer::from_value(cell.car()))?,
+                        seed.deserialize(Deserializer::from_value(cell.car()))?,
                     ))
                 }),
         }
@@ -463,7 +468,7 @@ impl<'de> de::MapAccess<'de> for MapAccess<'de> {
             .car()
             .as_cons()
             .ok_or_else(|| invalid_value(cell.car(), "cons cell"))
-            .and_then(|cell| seed.deserialize(&mut Deserializer::from_value(cell.cdr())))?;
+            .and_then(|cell| seed.deserialize(Deserializer::from_value(cell.cdr())))?;
         self.cursor = match cell.cdr() {
             Value::Cons(cell) => Some(cell),
             Value::Null => None,
@@ -491,7 +496,7 @@ impl<'de> de::EnumAccess<'de> for VariantAccess<'de> {
     where
         V: de::DeserializeSeed<'de>,
     {
-        let val = seed.deserialize(&mut Deserializer::from_value(self.cell.car()))?;
+        let val = seed.deserialize(Deserializer::from_value(self.cell.car()))?;
         Ok((val, self))
     }
 }
@@ -507,14 +512,14 @@ impl<'de> de::VariantAccess<'de> for VariantAccess<'de> {
     where
         T: de::DeserializeSeed<'de>,
     {
-        seed.deserialize(&mut Deserializer::from_value(self.cell.cdr()))
+        seed.deserialize(Deserializer::from_value(self.cell.cdr()))
     }
 
     fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
-        de::Deserializer::deserialize_seq(&mut Deserializer::from_value(self.cell.cdr()), visitor)
+        de::Deserializer::deserialize_seq( Deserializer::from_value(self.cell.cdr()), visitor)
     }
 
     fn struct_variant<V>(self, fields: &'static [&'static str], visitor: V) -> Result<V::Value>
@@ -522,7 +527,7 @@ impl<'de> de::VariantAccess<'de> for VariantAccess<'de> {
         V: de::Visitor<'de>,
     {
         de::Deserializer::deserialize_struct(
-            &mut Deserializer::from_value(self.cell.cdr()),
+            Deserializer::from_value(self.cell.cdr()),
             "",
             fields,
             visitor,
@@ -530,17 +535,18 @@ impl<'de> de::VariantAccess<'de> for VariantAccess<'de> {
     }
 }
 
-struct UnitVariantAccess<'a, 'de> {
-    de: &'a mut Deserializer<'de>,
+#[derive(Copy, Clone)]
+struct UnitVariantAccess<'de> {
+    de: Deserializer<'de>,
 }
 
-impl<'a, 'de> UnitVariantAccess<'a, 'de> {
-    fn new(de: &'a mut Deserializer<'de>) -> Self {
+impl<'de> UnitVariantAccess<'de> {
+    fn new(de: Deserializer<'de>) -> Self {
         UnitVariantAccess { de }
     }
 }
 
-impl<'a, 'de> de::EnumAccess<'de> for UnitVariantAccess<'a, 'de> {
+impl<'de> de::EnumAccess<'de> for UnitVariantAccess<'de> {
     type Error = Error;
     type Variant = Self;
 
@@ -548,12 +554,12 @@ impl<'a, 'de> de::EnumAccess<'de> for UnitVariantAccess<'a, 'de> {
     where
         V: de::DeserializeSeed<'de>,
     {
-        let variant = seed.deserialize(&mut *self.de)?;
+        let variant = seed.deserialize(self.de)?;
         Ok((variant, self))
     }
 }
 
-impl<'a, 'de> de::VariantAccess<'de> for UnitVariantAccess<'a, 'de> {
+impl<'de> de::VariantAccess<'de> for UnitVariantAccess<'de> {
     type Error = Error;
 
     fn unit_variant(self) -> Result<()> {
